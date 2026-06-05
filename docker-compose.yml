@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:13-alpine
+    container_name: network-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password123}
+      POSTGRES_DB: ${DB_NAME:-network_monitoring}
+      POSTGRES_INITDB_ARGS: "-c max_connections=200"
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schemas:/docker-entrypoint-initdb.d:ro
+    networks:
+      - network-monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Backend API Server (Node.js/TypeScript)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: network-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-5000}:5000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - BACKEND_PORT=5000
+      - DB_HOST=postgres
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-password123}
+      - DB_NAME=${DB_NAME:-network_monitoring}
+      - JWT_SECRET=${JWT_SECRET:-your_jwt_secret_key}
+      - ML_SERVICE_URL=http://ml-service:${ML_SERVICE_PORT:-5001}
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - network-monitoring
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Frontend React Application
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: network-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:${BACKEND_PORT:-5000}/api
+      - REACT_APP_WS_URL=ws://localhost:${BACKEND_PORT:-5000}
+      - NODE_ENV=${NODE_ENV:-development}
+    depends_on:
+      - backend
+    networks:
+      - network-monitoring
+    volumes:
+      - ./frontend/src:/app/src
+      - /app/node_modules
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ML Service (Python/Flask)
+  ml-service:
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile
+    container_name: network-ml-service
+    restart: unless-stopped
+    ports:
+      - "${ML_SERVICE_PORT:-5001}:5001"
+    environment:
+      - FLASK_ENV=${NODE_ENV:-development}
+      - ML_SERVICE_PORT=5001
+      - ML_MODEL_PATH=/app/models/random_forest_model.pkl
+      - ML_SCALER_PATH=/app/models/scaler.pkl
+      - ML_ENCODERS_PATH=/app/models/encoders.pkl
+      - PYTHONUNBUFFERED=1
+    networks:
+      - network-monitoring
+    volumes:
+      - ./ml-service:/app
+      - ml_models:/app/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+    driver: local
+  ml_models:
+    driver: local
+
+networks:
+  network-monitoring:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
